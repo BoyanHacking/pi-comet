@@ -39,7 +39,7 @@ import {
   type CDPClient,
   type ConsoleMessage,
   type NetworkRequest,
-} from "./modules/cdp-client.js";
+} from "./modules/cdp-client";
 
 // ============================================================================
 // State Management
