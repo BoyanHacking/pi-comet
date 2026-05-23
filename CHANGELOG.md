@@ -8,40 +8,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- Initial project scaffold
-- Package.json with dependencies
-- Extension entry point (src/index.ts)
-- Platform detection (macOS, Windows, WSL, Linux)
-- Core slash commands:
-  - `/comet launch` - Launch Comet in headed mode
-  - `/comet launch-headless` - Launch Comet in headless mode
-  - `/comet connect` - Connect to running Comet instance
-  - `/comet authorize` - Authorize current session
-  - `/comet revoke` - Revoke authorization
-  - `/comet status` - Show connection and authorization status
-  - `/comet doctor` - Run diagnostics and health checks
-  - `/comet onboard` - Show onboarding guide
-- Session-based authorization system
-- Phase 1 MVP tools (skeletons, full implementation in progress):
-  - `comet_launch` - Launch Comet browser in headed mode
-  - `comet_launch_headless` - Launch Comet browser in headless mode
-  - `comet_connect` - Connect to running Comet instance
-  - `comet_navigate` - Navigate to a URL
-  - `comet_screenshot` - Capture a screenshot
-  - `comet_evaluate` - Execute JavaScript
-  - `comet_tab` - Manage browser tabs
-- Comprehensive README documentation
-- GitHub repository setup
-- Contributing guidelines
-- MIT License
+- **Full CDP Client Implementation** (src/modules/cdp-client.ts)
+  - Chrome DevTools Protocol connection management
+  - Tab lifecycle management (list, create, activate, close)
+  - Page navigation and reload
+  - Screenshot capture (PNG/JPEG with quality control)
+  - JavaScript evaluation with promise support
+  - DOM interaction (click, type, scroll)
+  - Console message logging and retrieval
+  - Network request monitoring and inspection
+  - Document and element utilities
+
+- **Platform Detection Module** (src/modules/platform.ts)
+  - Automatic detection of macOS, Windows, WSL, Linux platforms
+  - Auto-discovery of Comet installation paths
+  - Platform-specific launch commands
+  - WSL mirrored networking verification
+  - Environment variable override support
+
+- **15+ Fully Implemented Tools**:
+  - **Core**: `comet_launch`, `comet_launch_headless`, `comet_connect`, `comet_tab`
+  - **Navigation**: `comet_navigate`, `comet_reload`, `comet_get_title`, `comet_get_url`
+  - **Interaction**: `comet_screenshot`, `comet_evaluate`, `comet_click`, `comet_type`, `comet_scroll`, `comet_get_html`
+  - **Observability**: `comet_list_console_messages`, `comet_list_network_requests`, `comet_get_network_request`
+
+- **Enhanced Features**:
+  - Session management with auto-reconnect
+  - Console and network monitoring started on connect
+  - Proper cleanup on session shutdown
+  - Enhanced `/comet status` with monitoring state
+  - Improved `/comet doctor` with detailed diagnostics
+
+- **Documentation**:
+  - Comprehensive API documentation (docs/api.md)
+  - 48 practical recipes and examples (docs/recipes.md)
+  - Updated README with all implemented features
+  - Contributing guidelines
+  - MIT License
+
+### Changed
+- Updated all tool implementations to use real CDP client
+- Enhanced slash commands with better feedback
+- Improved error messages with actionable guidance
 
 ### Planned (Phase 2)
-- DOM interaction tools (click, type, fill, hover, scroll)
-- DOM snapshot with UIDs
-- Wait for conditions
-- Console message listing
-- Network request inspection
-- Reload page tool
+- DOM snapshot with stable UIDs
+- Wait for conditions (element, text, custom)
+- Form filling utility
+- Keyboard event support
+- Hover element support
+- Enhanced console and network filtering
 
 ### Planned (Phase 3)
 - `comet_ask` - Delegate browsing task to Comet AI
@@ -50,16 +66,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Tab categorization (main, agent-browsing, sidecar)
 
 ### Planned (Phase 4)
-- Full platform support
-- WSL mirrored networking support
-- Auto-detect Comet paths
-- Headless mode improvements
+- WSL mirrored networking improvements
+- Headless mode enhancements
+- Better auto-detection of Comet paths
 
 ### Planned (Phase 5)
-- Enhanced error handling
-- Health check improvements
-- Advanced recipes and examples
-- Complete API documentation
+- Enhanced error handling with recovery
+- Advanced health checks
+- More recipes and examples
+- Performance optimizations
 
 ## [0.1.0] - 2026-05-23
 
