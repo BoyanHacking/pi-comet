@@ -1,0 +1,44 @@
+{
+  "name": "pi-comet",
+  "version": "0.1.0",
+  "description": "Pi extension for Perplexity Comet browser automation via Chrome DevTools Protocol",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "browser-automation",
+    "comet",
+    "perplexity",
+    "cdp"
+  ],
+  "author": "Your Name",
+  "license": "MIT",
+  "scripts": {
+    "clean": "rm -rf node_modules package-lock.json",
+    "build": "echo 'TypeScript files are loaded directly by jiti'",
+    "check": "echo 'No build step required'",
+    "test": "echo 'No tests yet'"
+  },
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "dependencies": {
+    "chrome-remote-interface": "^0.33.2"
+  },
+  "devDependencies": {
+    "@types/chrome-remote-interface": "^0.34.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/your-username/pi-comet.git"
+  },
+  "bugs": {
+    "url": "https://github.com/your-username/pi-comet/issues"
+  },
+  "homepage": "https://github.com/your-username/pi-comet#readme",
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
