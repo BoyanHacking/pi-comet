@@ -1,6 +1,6 @@
 # pi-comet
 
-A [Pi](https://github.com/earendil-works/pi-coding-agent) extension for controlling Perplexity Comet browser via Chrome DevTools Protocol (CDP). This extension enables Pi agents to automate web browsing, perform research, and interact with web pages in both headed (visible) and headless (background) modes.
+A [Pi](https://pi.dev) extension for controlling Perplexity Comet browser via Chrome DevTools Protocol (CDP). This extension enables Pi agents to automate web browsing, perform research, and interact with web pages in both headed (visible) and headless (background) modes.
 
 ## Features
 
@@ -332,6 +332,6 @@ MIT License - see [LICENSE](LICENSE) for details.
 
 ## See Also
 
-- [Pi Documentation](https://github.com/earendil-works/pi-coding-agent)
+- [Pi Documentation](https://pi.dev)
 - [Perplexity Comet](https://www.perplexity.ai/comet)
 - [Chrome DevTools Protocol](https://chromedevtools.github.io/devtools-protocol/)
