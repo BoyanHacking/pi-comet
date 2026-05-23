@@ -11,7 +11,7 @@
     "perplexity",
     "cdp"
   ],
-  "author": "Your Name",
+  "author": "BoyanHacking",
   "license": "MIT",
   "scripts": {
     "clean": "rm -rf node_modules package-lock.json",
@@ -25,19 +25,23 @@
     ]
   },
   "dependencies": {
-    "chrome-remote-interface": "^0.33.2"
+    "chrome-remote-interface": "^0.33.2",
+    "typebox": "^0.25.2"
   },
   "devDependencies": {
     "@types/chrome-remote-interface": "^0.34.0"
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/your-username/pi-comet.git"
+    "url": "git+https://github.com/BoyanHacking/pi-comet.git"
   },
   "bugs": {
-    "url": "https://github.com/your-username/pi-comet/issues"
+    "url": "https://github.com/BoyanHacking/pi-comet/issues"
   },
-  "homepage": "https://github.com/your-username/pi-comet#readme",
+  "homepage": "https://github.com/BoyanHacking/pi-comet#readme",
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
   "engines": {
     "node": ">=18.0.0"
   }
