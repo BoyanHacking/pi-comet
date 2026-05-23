@@ -125,47 +125,112 @@ async function detectPlatform(): Promise<PlatformInfo> {
 
 async function launchComet(options: { headless?: boolean; port?: number } = {}) {
   const { headless = false, port = 9222 } = options;
-  const { spawn } = await import("node:child_process");
+  const { spawn, execSync } = await import("node:child_process");
 
   const platform = await detectPlatform();
+  
+  // Check if Comet is installed
+  if (platform.platform === "wsl" || platform.platform === "windows") {
+    try {
+      // Try to find Comet.exe
+      const comPath = platform.platform === "wsl" 
+        ? "/mnt/c/Program Files/Perplexity Comet/Comet.exe"
+        : "C:\\Program Files\\Perplexity Comet\\Comet.exe";
+      
+      // Check for common installation paths
+      const commonPaths = [
+        "/mnt/c/Program Files/Perplexity Comet/Comet.exe",
+        "/mnt/c/Program Files (x86)/Perplexity Comet/Comet.exe",
+        "/mnt/c/Users/*/AppData/Local/Programs/Perplexity Comet/Comet.exe",
+      ];
+      
+      let cometExePath: string | undefined;
+      
+      for (const path of commonPaths) {
+        try {
+          execSync(`test -f "${path}"`, { stdio: "ignore" });
+          cometExePath = path;
+          break;
+        } catch {
+          // Path doesn't exist, continue
+        }
+      }
+      
+      if (!cometExePath) {
+        throw new Error(
+          "Comet browser not found. Please install Perplexity Comet from https://www.perplexity.ai/comet\n" +
+          "Expected locations:\n" +
+          "  - C:\\Program Files\\Perplexity Comet\\Comet.exe\n" +
+          "  - C:\\Program Files (x86)\\Perplexity Comet\\Comet.exe\n" +
+          "  - %LOCALAPPDATA%\\Programs\\Perplexity Comet\\Comet.exe"
+        );
+      }
+      
+      platform.cometPath = cometExePath;
+    } catch (error: any) {
+      if (error.message.includes("Comet browser not found")) {
+        throw error;
+      }
+      // Continue with default path if error is something else
+    }
+  }
+  
   let args: string[] = [];
   let command: string;
 
   if (platform.platform === "macos") {
     command = platform.cometPath || "open";
     if (command === "open") {
-      args = ["-a", "Comet", `--args`, `--remote-debugging-port=${port}`];
+      args = ["-a", "Comet", "--args", `--remote-debugging-port=${port}`];
     } else {
       args = [`--remote-debugging-port=${port}`];
     }
   } else if (platform.platform === "windows") {
     // Windows implementation
-    command = "Comet.exe";
+    command = platform.cometPath || "Comet.exe";
     args = [`--remote-debugging-port=${port}`];
     if (headless) {
       args.push("--headless");
     }
   } else if (platform.platform === "wsl") {
-    // WSL implementation - use PowerShell to launch Windows Comet
-    command = "powershell.exe";
-    const psArgs = [`Start-Process`, `"Comet.exe"`, `-ArgumentList`, `"--remote-debugging-port=${port}"`];
+    // WSL implementation - use cmd.exe to launch Windows Comet
+    command = "cmd.exe";
+    const comPath = platform.cometPath || "C:\\Program Files\\Perplexity Comet\\Comet.exe";
+    const comArgs = [`--remote-debugging-port=${port}`];
     if (headless) {
-      psArgs.push(`"--headless"`);
+      comArgs.push("--headless");
     }
-    args = ["-Command", psArgs.join(" ")];
+    // Use /c flag and wrap the path in quotes
+    args = ["/c", `start "" "${comPath}" ${comArgs.join(" ")}`];
   } else {
     throw new Error(`Comet browser not supported on platform: ${platform.platform}`);
   }
 
+  console.log(`Launching Comet: ${command} ${args.join(" ")}`);
+
   const process = spawn(command, args, {
     detached: true,
     stdio: "ignore",
+    shell: platform.platform === "wsl" || platform.platform === "windows",
   });
 
   process.unref();
 
-  // Wait for CDP port to be available
-  await waitForDebugPort(port);
+  // Wait longer for CDP port to be available (Comet takes time to start)
+  console.log(`Waiting for Comet to start on port ${port}...`);
+  try {
+    await waitForDebugPort(port, 60000); // 60 second timeout
+  } catch (error: any) {
+    throw new Error(
+      `Failed to connect to Comet CDP port ${port}.\n` +
+      `This could mean:\n` +
+      `  - Comet did not start successfully\n` +
+      `  - Comet doesn't support Chrome DevTools Protocol\n` +
+      `  - Port ${port} is blocked by firewall or another application\n` +
+      `  - Comet is already running with a different instance\n\n` +
+      `Try launching Comet manually first to verify installation.`
+    );
+  }
 
   cometState.isConnected = true;
   cometState.debugPort = port;
@@ -184,24 +249,44 @@ async function launchComet(options: { headless?: boolean; port?: number } = {}) 
 async function waitForDebugPort(port: number, timeout = 30000): Promise<void> {
   const net = await import("node:net");
   const startTime = Date.now();
+  const checkInterval = 1000; // Check every second
 
   return new Promise((resolve, reject) => {
+    let attempts = 0;
+    
     const checkConnection = () => {
+      attempts++;
+      const elapsed = Date.now() - startTime;
+      
+      if (elapsed > timeout) {
+        reject(new Error(`Timeout waiting for Comet on port ${port} after ${elapsed}ms`));
+        return;
+      }
+      
       const socket = net.createConnection(port, "127.0.0.1", () => {
+        console.log(`Connected to Comet on port ${port} after ${elapsed}ms`);
         socket.destroy();
         resolve();
       });
 
       socket.on("error", () => {
-        if (Date.now() - startTime > timeout) {
-          reject(new Error(`Timeout waiting for Comet on port ${port}`));
+        socket.destroy();
+        if (elapsed < timeout) {
+          // Log progress periodically
+          if (attempts % 5 === 0) {
+            console.log(`Still waiting for Comet... (${elapsed}ms elapsed)`);
+          }
+          setTimeout(checkConnection, checkInterval);
         } else {
-          setTimeout(checkConnection, 500);
+          reject(new Error(`Timeout waiting for Comet on port ${port} after ${elapsed}ms`));
         }
       });
 
       socket.on("close", () => {
-        // Ignore, will retry if timeout not reached
+        // Connection closed, retry
+        if (elapsed < timeout) {
+          setTimeout(checkConnection, checkInterval);
+        }
       });
     };
 
@@ -353,7 +438,22 @@ async function handleConnect(args: string, ctx: any) {
   const port = portMatch ? parseInt(portMatch[1]) : 9222;
 
   try {
-    await waitForDebugPort(port);
+    ctx.ui.notify(`Connecting to Comet on port ${port}...`, "info");
+    
+    // Check if we can connect immediately (Comet already running)
+    try {
+      await waitForDebugPort(port, 5000); // Quick check first
+    } catch {
+      ctx.ui.notify(
+        `Comet not running on port ${port}. Please launch Comet first using:\n` +
+        `  /comet launch\n` +
+        `  /comet launch-headless\n\n` +
+        `Or start Comet manually with remote debugging enabled.`,
+        "warning"
+      );
+      return { success: false, error: `Comet not running on port ${port}` };
+    }
+    
     cometState.debugPort = port;
     await refreshTargets();
     

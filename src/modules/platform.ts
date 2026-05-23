@@ -142,17 +142,44 @@ async function detectLinuxOrWSL(): Promise<PlatformInfo> {
 
   const platform = isWSL ? "wsl" : "linux";
 
+  // Find Comet.exe in Windows paths
+  let cometPath: string | undefined;
+  if (isWSL) {
+    try {
+      const { execSync } = await import("node:child_process");
+      
+      // Check common installation paths
+      const commonPaths = [
+        "/mnt/c/Program Files/Perplexity Comet/Comet.exe",
+        "/mnt/c/Program Files (x86)/Perplexity Comet/Comet.exe",
+        "/mnt/c/Users/*/AppData/Local/Programs/Perplexity Comet/Comet.exe",
+      ];
+      
+      for (const path of commonPaths) {
+        try {
+          execSync(`test -f "${path}"`, { stdio: "ignore" });
+          cometPath = path;
+          break;
+        } catch {
+          // Path doesn't exist, continue
+        }
+      }
+    } catch {
+      // Ignore errors
+    }
+  }
+
   return {
     platform,
-    cometPath: undefined, // Comet not available on Linux
+    cometPath,
     commands: {
-      launch: isWSL
-        ? ["powershell.exe", "-Command", "Start-Process 'Comet.exe' -ArgumentList '--remote-debugging-port=9222'"]
+      launch: isWSL && cometPath
+        ? ["cmd.exe", "/c", `start "" "${cometPath}" --remote-debugging-port=9222`]
         : [],
-      launchHeadless: isWSL
-        ? ["powershell.exe", "-Command", "Start-Process 'Comet.exe' -ArgumentList '--remote-debugging-port=9222', '--headless'"]
+      launchHeadless: isWSL && cometPath
+        ? ["cmd.exe", "/c", `start "" "${cometPath}" --remote-debugging-port=9222 --headless`]
         : [],
-      checkPath: ["powershell.exe", "-Command", "Test-Path 'C:\\Users\\*\\AppData\\Local\\Programs\\Perplexity Comet\\Comet.exe'"],
+      checkPath: ["ls", "/mnt/c/Program Files/Perplexity Comet", "/mnt/c/Program Files (x86)/Perplexity Comet"],
     },
   };
 }
