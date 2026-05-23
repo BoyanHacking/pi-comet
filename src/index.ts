@@ -9,6 +9,37 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import {
+  getTargets,
+  connectToTarget,
+  connectToFirstTarget,
+  navigate,
+  reload,
+  screenshot,
+  evaluate,
+  getTitle,
+  getURL,
+  getSnapshot,
+  getDocumentHTML,
+  click,
+  type as typeText,
+  scroll,
+  closeClient,
+  createTab,
+  closeTab,
+  activateTab,
+  startConsoleLogging,
+  getConsoleMessages,
+  clearConsoleMessages,
+  startNetworkMonitoring,
+  getNetworkRequests,
+  getNetworkRequest,
+  clearNetworkRequests,
+  type CDPTab,
+  type CDPClient,
+  type ConsoleMessage,
+  type NetworkRequest,
+} from "./modules/cdp-client.js";
 
 // ============================================================================
 // State Management
@@ -16,19 +47,28 @@ import { Type } from "typebox";
 
 interface CometState {
   isConnected: boolean;
-  cdpClient?: any;
+  cdpClient: CDPClient | null;
   debugPort: number;
   headless: boolean;
   cometPath?: string;
   authorized: boolean;
   authorizationExpiry?: number;
+  targets: CDPTab[];
+  activeTargetId?: string;
+  consoleLogging: boolean;
+  networkMonitoring: boolean;
 }
 
 let cometState: CometState = {
   isConnected: false,
+  cdpClient: null,
   debugPort: 9222,
   headless: false,
   authorized: false,
+  targets: [],
+  activeTargetId: undefined,
+  consoleLogging: false,
+  networkMonitoring: false,
 };
 
 // ============================================================================
@@ -52,7 +92,8 @@ async function detectPlatform(): Promise<PlatformInfo> {
     ];
     for (const path of commonPaths) {
       try {
-        await import("node:fs/promises").then((fs) => fs.access(path));
+        const fs = await import("node:fs/promises");
+        await fs.access(path);
         cometPath = path;
         break;
       } catch {
@@ -84,7 +125,6 @@ async function detectPlatform(): Promise<PlatformInfo> {
 
 async function launchComet(options: { headless?: boolean; port?: number } = {}) {
   const { headless = false, port = 9222 } = options;
-  const fs = await import("node:fs/promises");
   const { spawn } = await import("node:child_process");
 
   const platform = await detectPlatform();
@@ -169,6 +209,48 @@ async function waitForDebugPort(port: number, timeout = 30000): Promise<void> {
   });
 }
 
+async function refreshTargets(): Promise<void> {
+  cometState.targets = await getTargets(cometState.debugPort);
+  if (!cometState.activeTargetId && cometState.targets.length > 0) {
+    cometState.activeTargetId = cometState.targets[0].id;
+  }
+}
+
+async function ensureConnected(): Promise<CDPClient> {
+  if (!cometState.isConnected) {
+    throw new Error("Not connected to Comet. Use `/comet launch` or `/comet connect` first.");
+  }
+
+  if (!cometState.authorized) {
+    throw new Error("Comet session not authorized. Use `/comet authorize` first.");
+  }
+
+  if (!cometState.cdpClient || !cometState.activeTargetId) {
+    await refreshTargets();
+    if (cometState.targets.length === 0) {
+      throw new Error("No targets available. Is Comet running?");
+    }
+    
+    cometState.activeTargetId = cometState.targets[0].id;
+    cometState.cdpClient = await connectToTarget(
+      cometState.activeTargetId,
+      cometState.debugPort
+    );
+    
+    // Start monitoring if not already started
+    if (!cometState.consoleLogging) {
+      await startConsoleLogging(cometState.cdpClient.client);
+      cometState.consoleLogging = true;
+    }
+    if (!cometState.networkMonitoring) {
+      await startNetworkMonitoring(cometState.cdpClient.client);
+      cometState.networkMonitoring = true;
+    }
+  }
+
+  return cometState.cdpClient;
+}
+
 // ============================================================================
 // Extension Entry Point
 // ============================================================================
@@ -206,13 +288,23 @@ export default async function (pi: ExtensionAPI) {
     },
   });
 
-  // Phase 1: Core Browser Control Tools (MVP)
-  registerPhase1Tools(pi);
+  // Register all tools
+  registerCoreTools(pi);
+  registerNavigationTools(pi);
+  registerInteractionTools(pi);
+  registerObservabilityTools(pi);
 
   // Session management
   pi.on("session_start", async (_event, ctx) => {
-    // Restore authorization state from session if persisted
     ctx.ui.notify("pi-comet extension loaded", "info");
+  });
+
+  pi.on("session_shutdown", async (_event, _ctx) => {
+    // Cleanup CDP connection
+    if (cometState.cdpClient) {
+      await closeClient(cometState.cdpClient);
+      cometState.cdpClient = null;
+    }
   });
 }
 
@@ -224,6 +316,12 @@ async function handleLaunch(ctx: any) {
   try {
     ctx.ui.notify("Launching Comet browser...", "info");
     const result = await launchComet({ headless: false });
+    
+    // Wait a bit for Comet to fully start, then refresh targets
+    setTimeout(async () => {
+      await refreshTargets();
+    }, 2000);
+    
     ctx.ui.notify(result.message, "success");
     return { success: true, ...result };
   } catch (error: any) {
@@ -236,6 +334,12 @@ async function handleLaunchHeadless(ctx: any) {
   try {
     ctx.ui.notify("Launching Comet browser in headless mode...", "info");
     const result = await launchComet({ headless: true });
+    
+    // Wait for Comet to fully start
+    setTimeout(async () => {
+      await refreshTargets();
+    }, 2000);
+    
     ctx.ui.notify(result.message, "success");
     return { success: true, ...result };
   } catch (error: any) {
@@ -250,10 +354,12 @@ async function handleConnect(args: string, ctx: any) {
 
   try {
     await waitForDebugPort(port);
-    cometState.isConnected = true;
     cometState.debugPort = port;
-    ctx.ui.notify(`Connected to Comet on port ${port}`, "success");
-    return { success: true, port };
+    await refreshTargets();
+    
+    cometState.isConnected = true;
+    ctx.ui.notify(`Connected to Comet on port ${port} with ${cometState.targets.length} tab(s)`, "success");
+    return { success: true, port, tabs: cometState.targets.length };
   } catch (error: any) {
     ctx.ui.notify(`Failed to connect to Comet: ${error.message}`, "error");
     return { success: false, error: error.message };
@@ -285,6 +391,8 @@ async function handleRevoke(ctx: any) {
 }
 
 async function handleStatus(ctx: any) {
+  await refreshTargets();
+  
   const status = {
     connected: cometState.isConnected,
     port: cometState.debugPort,
@@ -293,6 +401,10 @@ async function handleStatus(ctx: any) {
     authorizedUntil: cometState.authorizationExpiry
       ? new Date(cometState.authorizationExpiry).toISOString()
       : null,
+    tabs: cometState.targets.length,
+    activeTab: cometState.activeTargetId,
+    consoleLogging: cometState.consoleLogging,
+    networkMonitoring: cometState.networkMonitoring,
   };
 
   const statusText = [
@@ -301,6 +413,10 @@ async function handleStatus(ctx: any) {
     `Mode: ${status.headless ? "headless" : "headed"}`,
     `Authorized: ${status.authorized}`,
     status.authorizedUntil ? `Authorization expires: ${status.authorizedUntil}` : "",
+    `Tabs: ${status.tabs}`,
+    status.activeTab ? `Active tab: ${status.activeTab.substring(0, 8)}...` : "",
+    `Console logging: ${status.consoleLogging ? "enabled" : "disabled"}`,
+    `Network monitoring: ${status.networkMonitoring ? "enabled" : "disabled"}`,
   ]
     .filter(Boolean)
     .join("\n");
@@ -352,6 +468,31 @@ async function handleDoctor(ctx: any) {
     status: cometState.isConnected ? "ok" : "warning",
   });
 
+  // Authorization status
+  diagnostics.push({
+    check: "Authorization",
+    result: cometState.authorized ? "Authorized" : "Not authorized",
+    status: cometState.authorized ? "ok" : "warning",
+  });
+
+  // Target count
+  if (cometState.isConnected) {
+    try {
+      await refreshTargets();
+      diagnostics.push({
+        check: "Targets",
+        result: `${cometState.targets.length} tab(s) available`,
+        status: "ok",
+      });
+    } catch (error: any) {
+      diagnostics.push({
+        check: "Targets",
+        result: `Failed to list targets: ${error.message}`,
+        status: "error",
+      });
+    }
+  }
+
   const diagnosticsText = diagnostics
     .map((d) => `[${d.status.toUpperCase()}] ${d.check}: ${d.result}`)
     .join("\n");
@@ -385,7 +526,7 @@ Environment Variables:
   COMET_HEADLESS      - Default to headless mode (default: false)
   COMET_TIMEOUT       - Default operation timeout (default: 30s)
 
-For more information, visit: https://github.com/your-username/pi-comet
+For more information, visit: https://github.com/BoyanHacking/pi-comet
 `;
 
   ctx.ui.notify(onboardingGuide, "info");
@@ -393,69 +534,10 @@ For more information, visit: https://github.com/your-username/pi-comet
 }
 
 // ============================================================================
-// Phase 1 Tools (MVP)
+// Core Tools
 // ============================================================================
 
-function registerPhase1Tools(pi: ExtensionAPI) {
-  // Tab Management
-  pi.registerTool({
-    name: "comet_tab",
-    label: "Comet Tab",
-    description: "List, create, activate, or close Comet browser tabs",
-    promptSnippet: "Manage Comet browser tabs",
-    parameters: Type.Object({
-      action: Type.String({
-        description: "Action to perform: 'list', 'create', 'activate', 'close'",
-      }),
-      tabId: Type.Optional(
-        Type.String({
-          description: "Target tab ID (for activate, close actions)",
-        })
-      ),
-      url: Type.Optional(
-        Type.String({
-          description: "URL to navigate to (for create action)",
-        })
-      ),
-    }),
-    async execute(toolCallId, params, signal, onUpdate, ctx) {
-      if (!cometState.authorized) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: "Comet session not authorized. Use `/comet authorize` first.",
-            },
-          ],
-          details: {},
-        };
-      }
-
-      if (!cometState.isConnected) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: "Not connected to Comet. Use `/comet launch` or `/comet connect` first.",
-            },
-          ],
-          details: {},
-        };
-      }
-
-      // TODO: Implement actual CDP operations
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Tab action '${params.action}' not yet implemented in Phase 1 MVP.`,
-          },
-        ],
-        details: {},
-      };
-    },
-  });
-
+function registerCoreTools(pi: ExtensionAPI) {
   // Launch Tool
   pi.registerTool({
     name: "comet_launch",
@@ -473,6 +555,12 @@ function registerPhase1Tools(pi: ExtensionAPI) {
       try {
         onUpdate?.({ content: [{ type: "text", text: "Launching Comet..." }] });
         const result = await launchComet({ headless: false, port: params.port });
+        
+        // Wait for Comet to fully start
+        setTimeout(async () => {
+          await refreshTargets();
+        }, 2000);
+        
         return {
           content: [
             {
@@ -514,6 +602,11 @@ function registerPhase1Tools(pi: ExtensionAPI) {
       try {
         onUpdate?.({ content: [{ type: "text", text: "Launching Comet in headless mode..." }] });
         const result = await launchComet({ headless: true, port: params.port });
+        
+        setTimeout(async () => {
+          await refreshTargets();
+        }, 2000);
+        
         return {
           content: [
             {
@@ -555,17 +648,21 @@ function registerPhase1Tools(pi: ExtensionAPI) {
       try {
         const port = params.port || 9222;
         onUpdate?.({ content: [{ type: "text", text: `Connecting to Comet on port ${port}...` }] });
+        
         await waitForDebugPort(port);
-        cometState.isConnected = true;
         cometState.debugPort = port;
+        await refreshTargets();
+        
+        cometState.isConnected = true;
+        
         return {
           content: [
             {
               type: "text",
-              text: `Connected to Comet on port ${port}`,
+              text: `Connected to Comet on port ${port} with ${cometState.targets.length} tab(s)`,
             },
           ],
-          details: { port },
+          details: { port, tabs: cometState.targets.length },
         };
       } catch (error: any) {
         return {
@@ -582,6 +679,135 @@ function registerPhase1Tools(pi: ExtensionAPI) {
     },
   });
 
+  // Tab Management Tool
+  pi.registerTool({
+    name: "comet_tab",
+    label: "Comet Tab",
+    description: "List, create, activate, or close Comet browser tabs",
+    promptSnippet: "Manage Comet browser tabs",
+    parameters: Type.Object({
+      action: Type.String({
+        description: "Action to perform: 'list', 'create', 'activate', 'close'",
+      }),
+      tabId: Type.Optional(
+        Type.String({
+          description: "Target tab ID (for activate, close actions)",
+        })
+      ),
+      url: Type.Optional(
+        Type.String({
+          description: "URL to navigate to (for create action)",
+        })
+      ),
+    }),
+    async execute(toolCallId, params, signal, onUpdate, ctx) {
+      try {
+        const client = await ensureConnected();
+        
+        switch (params.action) {
+          case "list": {
+            await refreshTargets();
+            const tabs = cometState.targets.map((t) => ({
+              id: t.id,
+              title: t.title,
+              url: t.url,
+              active: t.id === cometState.activeTargetId,
+            }));
+            
+            const text = tabs
+              .map((t, i) => `${i + 1}. [${t.active ? "ACTIVE" : "      "}] ${t.title}`)
+              .join("\n");
+            
+            return {
+              content: [{ type: "text", text }],
+              details: { tabs },
+            };
+          }
+          
+          case "create": {
+            const newTab = await createTab(cometState.debugPort);
+            if (params.url) {
+              await refreshTargets();
+              const client = await connectToTarget(newTab.id, cometState.debugPort);
+              await navigate(client.client, { url: params.url });
+              cometState.activeTargetId = newTab.id;
+              await closeClient(cometState.cdpClient!);
+              cometState.cdpClient = null;
+            }
+            await refreshTargets();
+            
+            return {
+              content: [{ type: "text", text: `Created new tab: ${newTab.id}` }],
+              details: { tabId: newTab.id },
+            };
+          }
+          
+          case "activate": {
+            if (!params.tabId) {
+              throw new Error("tabId is required for activate action");
+            }
+            await activateTab(params.tabId, cometState.debugPort);
+            cometState.activeTargetId = params.tabId;
+            
+            // Reconnect to the new active tab
+            if (cometState.cdpClient) {
+              await closeClient(cometState.cdpClient);
+            }
+            cometState.cdpClient = await connectToTarget(params.tabId, cometState.debugPort);
+            
+            return {
+              content: [{ type: "text", text: `Activated tab: ${params.tabId}` }],
+              details: { tabId: params.tabId },
+            };
+          }
+          
+          case "close": {
+            if (!params.tabId) {
+              throw new Error("tabId is required for close action");
+            }
+            await closeTab(params.tabId, cometState.debugPort);
+            
+            // If closing the active tab, switch to another
+            if (params.tabId === cometState.activeTargetId) {
+              await refreshTargets();
+              if (cometState.targets.length > 0) {
+                cometState.activeTargetId = cometState.targets[0].id;
+                if (cometState.cdpClient) {
+                  await closeClient(cometState.cdpClient);
+                }
+                cometState.cdpClient = await connectToTarget(cometState.activeTargetId, cometState.debugPort);
+              } else {
+                cometState.activeTargetId = undefined;
+                cometState.cdpClient = null;
+              }
+            }
+            await refreshTargets();
+            
+            return {
+              content: [{ type: "text", text: `Closed tab: ${params.tabId}` }],
+              details: { tabId: params.tabId },
+            };
+          }
+          
+          default:
+            throw new Error(`Unknown action: ${params.action}`);
+        }
+      } catch (error: any) {
+        return {
+          content: [{ type: "text", text: `Tab action failed: ${error.message}` }],
+          details: {},
+          isError: true,
+        };
+      }
+    },
+  });
+}
+
+// ============================================================================
+// Navigation Tools
+// ============================================================================
+
+function registerNavigationTools(pi: ExtensionAPI) {
   // Navigate Tool
   pi.registerTool({
     name: "comet_navigate",
@@ -604,31 +830,134 @@ function registerPhase1Tools(pi: ExtensionAPI) {
       ),
     }),
     async execute(toolCallId, params, signal, onUpdate, ctx) {
-      if (!cometState.authorized) {
+      try {
+        const client = await ensureConnected();
+        
+        onUpdate?.({ content: [{ type: "text", text: `Navigating to ${params.url}...` }] });
+        
+        const result = await navigate(client.client, {
+          url: params.url,
+          wait: params.wait,
+          timeout: params.timeout,
+        });
+        
         return {
           content: [
             {
               type: "text",
-              text: "Comet session not authorized. Use `/comet authorize` first.",
+              text: `Navigated to ${result.url}${result.loaded ? " (page loaded)" : ""}`,
             },
           ],
+          details: result,
+        };
+      } catch (error: any) {
+        return {
+          content: [{ type: "text", text: `Navigation failed: ${error.message}` }],
           details: {},
+          isError: true,
         };
       }
-
-      // TODO: Implement actual CDP navigation
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Navigation to ${params.url} not yet implemented in Phase 1 MVP.`,
-          },
-        ],
-        details: {},
-      };
     },
   });
 
+  // Reload Tool
+  pi.registerTool({
+    name: "comet_reload",
+    label: "Comet Reload",
+    description: "Reload the current page",
+    promptSnippet: "Reload current page",
+    parameters: Type.Object({
+      wait: Type.Optional(
+        Type.Boolean({
+          description: "Wait for page load to complete (default: true)",
+        })
+      ),
+      timeout: Type.Optional(
+        Type.Number({
+          description: "Maximum wait time in milliseconds (default: 30000)",
+        })
+      ),
+    }),
+    async execute(toolCallId, params, signal, onUpdate, ctx) {
+      try {
+        const client = await ensureConnected();
+        
+        onUpdate?.({ content: [{ type: "text", text: "Reloading page..." }] });
+        
+        await reload(client.client, params.wait, params.timeout);
+        
+        return {
+          content: [{ type: "text", text: "Page reloaded" }],
+          details: {},
+        };
+      } catch (error: any) {
+        return {
+          content: [{ type: "text", text: `Reload failed: ${error.message}` }],
+          details: {},
+          isError: true,
+        };
+      }
+    },
+  });
+
+  // Get Title Tool
+  pi.registerTool({
+    name: "comet_get_title",
+    label: "Comet Get Title",
+    description: "Get the current page title",
+    promptSnippet: "Get page title",
+    parameters: Type.Object({}),
+    async execute(toolCallId, params, signal, onUpdate, ctx) {
+      try {
+        const client = await ensureConnected();
+        const title = await getTitle(client.client);
+        
+        return {
+          content: [{ type: "text", text: title }],
+          details: { title },
+        };
+      } catch (error: any) {
+        return {
+          content: [{ type: "text", text: `Failed to get title: ${error.message}` }],
+          details: {},
+          isError: true,
+        };
+      }
+    },
+  });
+
+  // Get URL Tool
+  pi.registerTool({
+    name: "comet_get_url",
+    label: "Comet Get URL",
+    description: "Get the current page URL",
+    promptSnippet: "Get page URL",
+    parameters: Type.Object({}),
+    async execute(toolCallId, params, signal, onUpdate, ctx) {
+      try {
+        const client = await ensureConnected();
+        const url = await getURL(client.client);
+        
+        return {
+          content: [{ type: "text", text: url }],
+          details: { url },
+        };
+      } catch (error: any) {
+        return {
+          content: [{ type: "text", text: `Failed to get URL: ${error.message}` }],
+          details: {},
+          isError: true,
+        };
+      }
+    },
+  });
+}
+
+// ============================================================================
+// Interaction Tools
+// ============================================================================
+
+function registerInteractionTools(pi: ExtensionAPI) {
   // Screenshot Tool
   pi.registerTool({
     name: "comet_screenshot",
@@ -648,28 +977,36 @@ function registerPhase1Tools(pi: ExtensionAPI) {
       ),
     }),
     async execute(toolCallId, params, signal, onUpdate, ctx) {
-      if (!cometState.authorized) {
+      try {
+        const client = await ensureConnected();
+        
+        onUpdate?.({ content: [{ type: "text", text: "Capturing screenshot..." }] });
+        
+        const data = await screenshot(client.client, {
+          format: params.format as "png" | "jpeg",
+          quality: params.quality,
+        });
+        
         return {
           content: [
             {
-              type: "text",
-              text: "Comet session not authorized. Use `/comet authorize` first.",
+              type: "image",
+              source: {
+                type: "base64",
+                mediaType: `image/${params.format || "png"}`,
+                data,
+              },
             },
           ],
+          details: { format: params.format || "png" },
+        };
+      } catch (error: any) {
+        return {
+          content: [{ type: "text", text: `Screenshot failed: ${error.message}` }],
           details: {},
+          isError: true,
         };
       }
-
-      // TODO: Implement actual CDP screenshot
-      return {
-        content: [
-          {
-            type: "text",
-            text: "Screenshot capture not yet implemented in Phase 1 MVP.",
-          },
-        ],
-        details: {},
-      };
     },
   });
 
@@ -690,28 +1027,329 @@ function registerPhase1Tools(pi: ExtensionAPI) {
       ),
     }),
     async execute(toolCallId, params, signal, onUpdate, ctx) {
-      if (!cometState.authorized) {
+      try {
+        const client = await ensureConnected();
+        
+        onUpdate?.({ content: [{ type: "text", text: "Executing JavaScript..." }] });
+        
+        const result = await evaluate(client.client, {
+          expression: params.expression,
+          awaitPromise: params.awaitPromise,
+        });
+        
+        const resultText = typeof result.result === "object"
+          ? JSON.stringify(result.result, null, 2)
+          : String(result.result);
+        
         return {
           content: [
             {
               type: "text",
-              text: "Comet session not authorized. Use `/comet authorize` first.",
+              text: `Result (${result.type}):\n${resultText}`,
             },
           ],
+          details: result,
+        };
+      } catch (error: any) {
+        return {
+          content: [{ type: "text", text: `Evaluation failed: ${error.message}` }],
           details: {},
+          isError: true,
         };
       }
+    },
+  });
 
-      // TODO: Implement actual CDP evaluate
-      return {
-        content: [
-          {
-            type: "text",
-            text: "JavaScript evaluation not yet implemented in Phase 1 MVP.",
-          },
-        ],
-        details: {},
-      };
+  // Click Tool
+  pi.registerTool({
+    name: "comet_click",
+    label: "Comet Click",
+    description: "Click an element by CSS selector",
+    promptSnippet: "Click element on page",
+    parameters: Type.Object({
+      selector: Type.String({
+        description: "CSS selector for the element to click",
+      }),
+    }),
+    async execute(toolCallId, params, signal, onUpdate, ctx) {
+      try {
+        const client = await ensureConnected();
+        
+        onUpdate?.({ content: [{ type: "text", text: `Clicking element: ${params.selector}...` }] });
+        
+        await click(client.client, params.selector);
+        
+        return {
+          content: [{ type: "text", text: `Clicked element: ${params.selector}` }],
+          details: { selector: params.selector },
+        };
+      } catch (error: any) {
+        return {
+          content: [{ type: "text", text: `Click failed: ${error.message}` }],
+          details: {},
+          isError: true,
+        };
+      }
+    },
+  });
+
+  // Type Tool
+  pi.registerTool({
+    name: "comet_type",
+    label: "Comet Type",
+    description: "Type text into an input field",
+    promptSnippet: "Type text into input field",
+    parameters: Type.Object({
+      selector: Type.String({
+        description: "CSS selector for the input field",
+      }),
+      text: Type.String({
+        description: "Text to type",
+      }),
+      clear: Type.Optional(
+        Type.Boolean({
+          description: "Clear the field before typing (default: true)",
+        })
+      ),
+    }),
+    async execute(toolCallId, params, signal, onUpdate, ctx) {
+      try {
+        const client = await ensureConnected();
+        
+        onUpdate?.({ content: [{ type: "text", text: `Typing into: ${params.selector}...` }] });
+        
+        await typeText(client.client, params.selector, params.text, params.clear);
+        
+        return {
+          content: [{ type: "text", text: `Typed "${params.text}" into ${params.selector}` }],
+          details: { selector: params.selector, text: params.text },
+        };
+      } catch (error: any) {
+        return {
+          content: [{ type: "text", text: `Type failed: ${error.message}` }],
+          details: {},
+          isError: true,
+        };
+      }
+    },
+  });
+
+  // Scroll Tool
+  pi.registerTool({
+    name: "comet_scroll",
+    label: "Comet Scroll",
+    description: "Scroll the page or scroll an element into view",
+    promptSnippet: "Scroll page or element",
+    parameters: Type.Object({
+      x: Type.Optional(
+        Type.Number({
+          description: "Horizontal scroll position (for page scroll)",
+        })
+      ),
+      y: Type.Optional(
+        Type.Number({
+          description: "Vertical scroll position (for page scroll)",
+        })
+      ),
+      selector: Type.Optional(
+        Type.String({
+          description: "CSS selector for element to scroll into view",
+        })
+      ),
+    }),
+    async execute(toolCallId, params, signal, onUpdate, ctx) {
+      try {
+        const client = await ensureConnected();
+        
+        onUpdate?.({ content: [{ type: "text", text: "Scrolling..." }] });
+        
+        await scroll(client.client, {
+          x: params.x,
+          y: params.y,
+          selector: params.selector,
+        });
+        
+        const target = params.selector
+          ? `Element: ${params.selector}`
+          : `Position: (${params.x || 0}, ${params.y || 0})`;
+        
+        return {
+          content: [{ type: "text", text: `Scrolled to ${target}` }],
+          details: { x: params.x, y: params.y, selector: params.selector },
+        };
+      } catch (error: any) {
+        return {
+          content: [{ type: "text", text: `Scroll failed: ${error.message}` }],
+          details: {},
+          isError: true,
+        };
+      }
+    },
+  });
+
+  // Get HTML Tool
+  pi.registerTool({
+    name: "comet_get_html",
+    label: "Comet Get HTML",
+    description: "Get the current page's outer HTML",
+    promptSnippet: "Get page HTML",
+    parameters: Type.Object({}),
+    async execute(toolCallId, params, signal, onUpdate, ctx) {
+      try {
+        const client = await ensureConnected();
+        const html = await getDocumentHTML(client.client);
+        
+        // Truncate HTML if too long (limit to ~50KB)
+        const truncated = html.length > 50000
+          ? html.substring(0, 50000) + "\n\n... (truncated)"
+          : html;
+        
+        return {
+          content: [{ type: "text", text: truncated }],
+          details: { length: html.length, truncated: html.length > 50000 },
+        };
+      } catch (error: any) {
+        return {
+          content: [{ type: "text", text: `Failed to get HTML: ${error.message}` }],
+          details: {},
+          isError: true,
+        };
+      }
+    },
+  });
+}
+
+// ============================================================================
+// Observability Tools
+// ============================================================================
+
+function registerObservabilityTools(pi: ExtensionAPI) {
+  // List Console Messages Tool
+  pi.registerTool({
+    name: "comet_list_console_messages",
+    label: "Comet Console Messages",
+    description: "Get browser console messages",
+    promptSnippet: "Get console logs",
+    parameters: Type.Object({
+      clear: Type.Optional(
+        Type.Boolean({
+          description: "Clear messages after retrieving (default: false)",
+        })
+      ),
+    }),
+    async execute(toolCallId, params, signal, onUpdate, ctx) {
+      try {
+        await ensureConnected();
+        
+        const messages = getConsoleMessages();
+        
+        if (params.clear) {
+          clearConsoleMessages();
+        }
+        
+        const text = messages.length === 0
+          ? "No console messages"
+          : messages
+              .map((m) => `[${m.level.toUpperCase()}] ${m.text}`)
+              .join("\n");
+        
+        return {
+          content: [{ type: "text", text }],
+          details: { count: messages.length, messages },
+        };
+      } catch (error: any) {
+        return {
+          content: [{ type: "text", text: `Failed to get console messages: ${error.message}` }],
+          details: {},
+          isError: true,
+        };
+      }
+    },
+  });
+
+  // List Network Requests Tool
+  pi.registerTool({
+    name: "comet_list_network_requests",
+    label: "Comet Network Requests",
+    description: "List network requests made by the page",
+    promptSnippet: "List network requests",
+    parameters: Type.Object({
+      clear: Type.Optional(
+        Type.Boolean({
+          description: "Clear requests after retrieving (default: false)",
+        })
+      ),
+    }),
+    async execute(toolCallId, params, signal, onUpdate, ctx) {
+      try {
+        await ensureConnected();
+        
+        const requests = getNetworkRequests();
+        
+        if (params.clear) {
+          clearNetworkRequests();
+        }
+        
+        const text = requests.length === 0
+          ? "No network requests"
+          : requests
+              .map((r) => `[${r.request.method}] ${r.request.url}${r.response ? ` (${r.response.status})` : ""}`)
+              .join("\n");
+        
+        return {
+          content: [{ type: "text", text }],
+          details: { count: requests.length, requests },
+        };
+      } catch (error: any) {
+        return {
+          content: [{ type: "text", text: `Failed to get network requests: ${error.message}` }],
+          details: {},
+          isError: true,
+        };
+      }
+    },
+  });
+
+  // Get Network Request Tool
+  pi.registerTool({
+    name: "comet_get_network_request",
+    label: "Comet Network Request",
+    description: "Get detailed information about a specific network request",
+    promptSnippet: "Get network request details",
+    parameters: Type.Object({
+      requestId: Type.String({
+        description: "Request ID to fetch details for",
+      }),
+    }),
+    async execute(toolCallId, params, signal, onUpdate, ctx) {
+      try {
+        await ensureConnected();
+        
+        const request = getNetworkRequest(params.requestId);
+        
+        if (!request) {
+          throw new Error(`Request ${params.requestId} not found`);
+        }
+        
+        const text = [
+          `URL: ${request.request.url}`,
+          `Method: ${request.request.method}`,
+          `Status: ${request.response?.status || "pending"}`,
+          `Headers: ${JSON.stringify(request.request.headers, null, 2)}`,
+          request.response ? `Response Headers: ${JSON.stringify(request.response.headers, null, 2)}` : "",
+        ].filter(Boolean).join("\n");
+        
+        return {
+          content: [{ type: "text", text }],
+          details: request,
+        };
+      } catch (error: any) {
+        return {
+          content: [{ type: "text", text: `Failed to get network request: ${error.message}` }],
+          details: {},
+          isError: true,
+        };
+      }
     },
   });
 }
