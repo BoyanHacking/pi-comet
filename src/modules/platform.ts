@@ -126,21 +126,31 @@ async function detectLinuxOrWSL(): Promise<PlatformInfo> {
   if (isWSL) {
     try {
       const { execSync } = await import("node:child_process");
+      const fs = await import("node:fs/promises");
       
       // Get LOCALAPPDATA from Windows via cmd.exe
       const localAppData = execSync('cmd.exe /c echo %LOCALAPPDATA%', { encoding: 'utf8' })
         .trim().replace(/\r?\n/g, '');
       
-      const possiblePaths = [
+      // Convert Windows path to WSL mounted path for testing
+      // C:\Users\GalyaPC\AppData\Local → /mnt/c/Users/GalyaPC/AppData/Local
+      const localAppDataWSL = localAppData.replace(/^C:/, '/mnt/c/').replace(/\\/g, '/');
+      
+      const possibleWindowsPaths = [
         `${localAppData}\\Perplexity\\Comet\\Application\\comet.exe`,
-        `C:\\Program Files\\Perplexity\\Comet\\Application\\comet.exe`,
-        `C:\\Program Files (x86)\\Perplexity\\Comet\\Application\\comet.exe`,
+        "C:\\Program Files\\Perplexity\\Comet\\Application\\comet.exe",
+        "C:\\Program Files (x86)\\Perplexity\\Comet\\Application\\comet.exe",
       ];
       
-      for (const path of possiblePaths) {
+      // Test using WSL paths
+      const possibleWSLPaths = possibleWindowsPaths.map(wp => 
+        wp.replace(/^C:/, '/mnt/c/').replace(/\\/g, '/')
+      );
+      
+      for (let i = 0; i < possibleWSLPaths.length; i++) {
         try {
-          execSync(`cmd.exe /c "test -f '${path}'"`, { stdio: "ignore" });
-          cometPath = path;
+          await fs.access(possibleWSLPaths[i]);
+          cometPath = possibleWindowsPaths[i]; // Store Windows path for launching
           break;
         } catch {
           // Path doesn't exist, continue
@@ -162,7 +172,7 @@ async function detectLinuxOrWSL(): Promise<PlatformInfo> {
         ? ["powershell.exe", "-NoProfile", "-Command", `Set-Location C:\\; Start-Process -FilePath '${cometPath}' -ArgumentList '--remote-debugging-port=9222', '--headless'`]
         : [],
       checkPath: isWSL
-        ? ["cmd.exe", "/c", "test -f '%LOCALAPPDATA%\\Perplexity\\Comet\\Application\\comet.exe'"]
+        ? ["bash", "-c", "test -f '/mnt/c/Users/*/AppData/Local/Perplexity/Comet/Application/comet.exe'"]
         : [],
     },
   };
