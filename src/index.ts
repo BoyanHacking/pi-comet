@@ -125,56 +125,29 @@ async function detectPlatform(): Promise<PlatformInfo> {
 
 async function launchComet(options: { headless?: boolean; port?: number } = {}) {
   const { headless = false, port = 9222 } = options;
-  const { spawn, execSync } = await import("node:child_process");
+  const { spawn } = await import("node:child_process");
 
   const platform = await detectPlatform();
   
-  // Check if Comet is installed
-  if (platform.platform === "wsl" || platform.platform === "windows") {
-    try {
-      // Try to find Comet.exe
-      const comPath = platform.platform === "wsl" 
-        ? "/mnt/c/Program Files/Perplexity Comet/Comet.exe"
-        : "C:\\Program Files\\Perplexity Comet\\Comet.exe";
-      
-      // Check for common installation paths
-      const commonPaths = [
-        "/mnt/c/Program Files/Perplexity Comet/Comet.exe",
-        "/mnt/c/Program Files (x86)/Perplexity Comet/Comet.exe",
-        "/mnt/c/Users/*/AppData/Local/Programs/Perplexity Comet/Comet.exe",
-      ];
-      
-      let cometExePath: string | undefined;
-      
-      for (const path of commonPaths) {
-        try {
-          execSync(`test -f "${path}"`, { stdio: "ignore" });
-          cometExePath = path;
-          break;
-        } catch {
-          // Path doesn't exist, continue
-        }
-      }
-      
-      if (!cometExePath) {
-        throw new Error(
-          "Comet browser not found. Please install Perplexity Comet from https://www.perplexity.ai/comet\n" +
-          "Expected locations:\n" +
-          "  - C:\\Program Files\\Perplexity Comet\\Comet.exe\n" +
-          "  - C:\\Program Files (x86)\\Perplexity Comet\\Comet.exe\n" +
-          "  - %LOCALAPPDATA%\\Programs\\Perplexity Comet\\Comet.exe"
-        );
-      }
-      
-      platform.cometPath = cometExePath;
-    } catch (error: any) {
-      if (error.message.includes("Comet browser not found")) {
-        throw error;
-      }
-      // Continue with default path if error is something else
-    }
+  // First, check if Comet is already running WITH debugging enabled
+  try {
+    await waitForDebugPort(port, 3000); // Quick check
+    console.log(`Comet already running with debug port ${port}`);
+    
+    cometState.isConnected = true;
+    cometState.debugPort = port;
+    cometState.headless = headless;
+    cometState.cometPath = platform.cometPath;
+    
+    return {
+      success: true,
+      message: `Comet already running on port ${port}`,
+      alreadyRunning: true,
+    };
+  } catch {
+    // Comet not accessible or not running, need to launch
   }
-  
+
   let args: string[] = [];
   let command: string;
 
@@ -187,36 +160,57 @@ async function launchComet(options: { headless?: boolean; port?: number } = {}) 
     }
   } else if (platform.platform === "windows") {
     // Windows implementation
-    command = platform.cometPath || "Comet.exe";
+    if (!platform.cometPath) {
+      throw new Error(
+        "Comet browser not found. Please install Perplexity Comet from https://www.perplexity.ai/comet\n" +
+        "Expected location:\n" +
+        "  - %LOCALAPPDATA%\\Perplexity\\Comet\\Application\\comet.exe\n" +
+        "\nOr set COMET_PATH environment variable."
+      );
+    }
+    
+    command = platform.cometPath;
     args = [`--remote-debugging-port=${port}`];
     if (headless) {
       args.push("--headless");
     }
   } else if (platform.platform === "wsl") {
-    // WSL implementation - use cmd.exe to launch Windows Comet
-    command = "cmd.exe";
-    const comPath = platform.cometPath || "C:\\Program Files\\Perplexity Comet\\Comet.exe";
-    const comArgs = [`--remote-debugging-port=${port}`];
-    if (headless) {
-      comArgs.push("--headless");
+    // WSL implementation - use PowerShell to launch Windows Comet with proper path
+    // Based on comet-mcp implementation
+    if (!platform.cometPath) {
+      throw new Error(
+        "Comet browser not found. Please install Perplexity Comet from https://www.perplexity.ai/comet\n" +
+        "Expected location:\n" +
+        "  - %LOCALAPPDATA%\\Perplexity\\Comet\\Application\\comet.exe\n" +
+        "\nOr set COMET_PATH environment variable."
+      );
     }
-    // Use /c flag and wrap the path in quotes
-    args = ["/c", `start "" "${comPath}" ${comArgs.join(" ")}`];
+    
+    command = "powershell.exe";
+    // Use Set-Location C:\ to avoid UNC path issues (from comet-mcp)
+    const psCommand = `Set-Location C:\\; Start-Process -FilePath '${platform.cometPath}' -ArgumentList '--remote-debugging-port=${port}'`;
+    
+    if (headless) {
+      // Add headless flag
+      const headlessCommand = `Set-Location C:\\; Start-Process -FilePath '${platform.cometPath}' -ArgumentList '--remote-debugging-port=${port}', '--headless'`;
+      args = ["-NoProfile", "-Command", headlessCommand];
+    } else {
+      args = ["-NoProfile", "-Command", psCommand];
+    }
   } else {
     throw new Error(`Comet browser not supported on platform: ${platform.platform}`);
   }
 
-  console.log(`Launching Comet: ${command} ${args.join(" ")}`);
+  console.log(`Launching Comet: ${command} ${args.length > 2 ? args.slice(0, 2).join(' ') + '...' : args.join(' ')}`);
 
   const process = spawn(command, args, {
     detached: true,
     stdio: "ignore",
-    shell: platform.platform === "wsl" || platform.platform === "windows",
   });
 
   process.unref();
 
-  // Wait longer for CDP port to be available (Comet takes time to start)
+  // Wait for CDP port to be available
   console.log(`Waiting for Comet to start on port ${port}...`);
   try {
     await waitForDebugPort(port, 60000); // 60 second timeout
@@ -226,9 +220,8 @@ async function launchComet(options: { headless?: boolean; port?: number } = {}) 
       `This could mean:\n` +
       `  - Comet did not start successfully\n` +
       `  - Comet doesn't support Chrome DevTools Protocol\n` +
-      `  - Port ${port} is blocked by firewall or another application\n` +
-      `  - Comet is already running with a different instance\n\n` +
-      `Try launching Comet manually first to verify installation.`
+      `  - Port ${port} is blocked by firewall or another application\n\n` +
+      `Try manually: ${platform.cometPath || 'Comet.exe'} --remote-debugging-port=${port}`
     );
   }
 

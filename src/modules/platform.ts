@@ -2,6 +2,7 @@
  * Platform Detection Module
  *
  * Handles detection of the current platform and Comet browser paths.
+ * Based on comet-mcp implementation.
  */
 
 export interface PlatformInfo {
@@ -54,17 +55,6 @@ async function detectMacOS(): Promise<PlatformInfo> {
     }
   }
 
-  // If no path found, check if "Comet" is in PATH
-  if (!cometPath) {
-    try {
-      const { execSync } = await import("node:child_process");
-      execSync("which Comet", { stdio: "ignore" });
-      cometPath = "Comet";
-    } catch {
-      // Not in PATH
-    }
-  }
-
   return {
     platform: "macos",
     cometPath,
@@ -79,38 +69,27 @@ async function detectMacOS(): Promise<PlatformInfo> {
 }
 
 /**
- * Detect Windows platform
+ * Detect Windows platform with proper path detection (from comet-mcp)
  */
 async function detectWindows(): Promise<PlatformInfo> {
-  const { execSync } = await import("node:child_process");
+  // Check common installation paths (from comet-mcp)
+  const possiblePaths = [
+    `${process.env.LOCALAPPDATA}\\Perplexity\\Comet\\Application\\comet.exe`,
+    `${process.env.APPDATA}\\Perplexity\\Comet\\Application\\comet.exe`,
+    "C:\\Program Files\\Perplexity\\Comet\\Application\\comet.exe",
+    "C:\\Program Files (x86)\\Perplexity\\Comet\\Application\\comet.exe",
+  ];
 
-  // Check if Comet.exe is in PATH
   let cometPath: string | undefined;
-  try {
-    execSync("where Comet.exe", { stdio: "ignore" });
-    cometPath = "Comet.exe";
-  } catch {
-    // Not in PATH
-  }
+  const fs = await import("node:fs/promises");
 
-  // Check common installation paths
-  if (!cometPath) {
-    const commonPaths = [
-      `${process.env.LOCALAPPDATA}\\Programs\\Perplexity Comet\\Comet.exe`,
-      `${process.env.PROGRAMFILES}\\Perplexity Comet\\Comet.exe`,
-      `${process.env.PROGRAMFILES(X86)}\\Perplexity Comet\\Comet.exe`,
-    ];
-
-    const fs = await import("node:fs/promises");
-
-    for (const path of commonPaths) {
-      try {
-        await fs.access(path);
-        cometPath = path;
-        break;
-      } catch {
-        // Path doesn't exist, continue
-      }
+  for (const path of possiblePaths) {
+    try {
+      await fs.access(path);
+      cometPath = path;
+      break;
+    } catch {
+      // Path doesn't exist, continue
     }
   }
 
@@ -118,15 +97,15 @@ async function detectWindows(): Promise<PlatformInfo> {
     platform: "windows",
     cometPath,
     commands: {
-      launch: [cometPath || "Comet.exe", "--remote-debugging-port=9222"],
-      launchHeadless: [cometPath || "Comet.exe", "--remote-debugging-port=9222", "--headless"],
-      checkPath: ["dir", "%LOCALAPPDATA%\\Programs\\Perplexity Comet", "%PROGRAMFILES%\\Perplexity Comet"],
+      launch: cometPath ? [cometPath, "--remote-debugging-port=9222"] : [],
+      launchHeadless: cometPath ? [cometPath, "--remote-debugging-port=9222", "--headless"] : [],
+      checkPath: ["dir", "%LOCALAPPDATA%\\Perplexity\\Comet\\Application"],
     },
   };
 }
 
 /**
- * Detect Linux or WSL platform
+ * Detect Linux or WSL platform with proper Comet path detection (from comet-mcp)
  */
 async function detectLinuxOrWSL(): Promise<PlatformInfo> {
   let isWSL = false;
@@ -142,22 +121,25 @@ async function detectLinuxOrWSL(): Promise<PlatformInfo> {
 
   const platform = isWSL ? "wsl" : "linux";
 
-  // Find Comet.exe in Windows paths
+  // Find Comet.exe in Windows paths (for WSL)
   let cometPath: string | undefined;
   if (isWSL) {
     try {
       const { execSync } = await import("node:child_process");
       
-      // Check common installation paths
-      const commonPaths = [
-        "/mnt/c/Program Files/Perplexity Comet/Comet.exe",
-        "/mnt/c/Program Files (x86)/Perplexity Comet/Comet.exe",
-        "/mnt/c/Users/*/AppData/Local/Programs/Perplexity Comet/Comet.exe",
+      // Get LOCALAPPDATA from Windows via cmd.exe
+      const localAppData = execSync('cmd.exe /c echo %LOCALAPPDATA%', { encoding: 'utf8' })
+        .trim().replace(/\r?\n/g, '');
+      
+      const possiblePaths = [
+        `${localAppData}\\Perplexity\\Comet\\Application\\comet.exe`,
+        `C:\\Program Files\\Perplexity\\Comet\\Application\\comet.exe`,
+        `C:\\Program Files (x86)\\Perplexity\\Comet\\Application\\comet.exe`,
       ];
       
-      for (const path of commonPaths) {
+      for (const path of possiblePaths) {
         try {
-          execSync(`test -f "${path}"`, { stdio: "ignore" });
+          execSync(`cmd.exe /c "test -f '${path}'"`, { stdio: "ignore" });
           cometPath = path;
           break;
         } catch {
@@ -174,12 +156,14 @@ async function detectLinuxOrWSL(): Promise<PlatformInfo> {
     cometPath,
     commands: {
       launch: isWSL && cometPath
-        ? ["cmd.exe", "/c", `start "" "${cometPath}" --remote-debugging-port=9222`]
+        ? ["powershell.exe", "-NoProfile", "-Command", `Set-Location C:\\; Start-Process -FilePath '${cometPath}' -ArgumentList '--remote-debugging-port=9222'`]
         : [],
       launchHeadless: isWSL && cometPath
-        ? ["cmd.exe", "/c", `start "" "${cometPath}" --remote-debugging-port=9222 --headless`]
+        ? ["powershell.exe", "-NoProfile", "-Command", `Set-Location C:\\; Start-Process -FilePath '${cometPath}' -ArgumentList '--remote-debugging-port=9222', '--headless'`]
         : [],
-      checkPath: ["ls", "/mnt/c/Program Files/Perplexity Comet", "/mnt/c/Program Files (x86)/Perplexity Comet"],
+      checkPath: isWSL
+        ? ["cmd.exe", "/c", "test -f '%LOCALAPPDATA%\\Perplexity\\Comet\\Application\\comet.exe'"]
+        : [],
     },
   };
 }
@@ -205,19 +189,20 @@ export function getPlatformInstructions(platform: PlatformInfo): string {
 
     case "windows":
       if (platform.cometPath) {
-        return "✓ Comet detected in PATH or at: " + platform.cometPath;
+        return "✓ Comet detected at: " + platform.cometPath;
       } else {
-        return "⚠ Comet not found in PATH. Please:\n1. Install Perplexity Comet from https://www.perplexity.ai/comet\n2. Add Comet.exe to your PATH\n3. Or set COMET_PATH environment variable";
+        return "⚠ Comet not found. Please:\n1. Install Perplexity Comet from https://www.perplexity.ai/comet\n2. Default location: %LOCALAPPDATA%\\Perplexity\\Comet\\Application\\comet.exe";
       }
 
     case "wsl":
-      return "ℹ Running under WSL. Using PowerShell to launch Windows Comet.\n" +
-             "Ensure WSL2 is configured with mirrored networking for best results:\n" +
-             "  wsl --set-version <distro> 2";
+      if (platform.cometPath) {
+        return "✓ Comet detected at: " + platform.cometPath + " (via WSL)";
+      } else {
+        return "⚠ Comet not found. Please:\n1. Install Perplexity Comet from https://www.perplexity.ai/comet on Windows\n2. Default location: %LOCALAPPDATA%\\Perplexity\\Comet\\Application\\comet.exe\n3. Ensure WSL has access to Windows filesystem";
+      }
 
     case "linux":
-      return "✗ Comet browser is not available for Linux.\n" +
-             "Use WSL on Windows or macOS instead.";
+      return "✗ Comet browser is not available for Linux.\nUse WSL on Windows or macOS instead.";
 
     default:
       return "Unknown platform";
